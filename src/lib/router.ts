@@ -44,15 +44,27 @@ export function setLeaveGuard(guard: LeaveGuard | null): void {
 export function useRoute(): Route {
   const [route, setRoute] = useState(() => parseHash(window.location.hash));
   useEffect(() => {
+    // 기록마다 순번을 붙여, 막힌 이동이 새 기록(링크)인지 뒤로/앞으로인지 구분해 원래 자리로 되돌린다.
+    const stateIdx = () => {
+      const idx = (history.state as { idx?: unknown } | null)?.idx;
+      return typeof idx === 'number' ? idx : null;
+    };
     let currentHash = window.location.hash;
+    let currentIdx = stateIdx() ?? 0;
+    history.replaceState({ idx: currentIdx }, '');
+
     const onChange = () => {
       const target = window.location.hash;
-      if (target === currentHash) return;
+      if (target === currentHash) return; // 되돌리기로 돌아온 경우 포함
+      const targetIdx = stateIdx();
       if (leaveGuard && !leaveGuard(target)) {
-        // shortcut: 뒤로가기로 막힌 경우 앞쪽 기록이 하나 남는다. 기록 조작이 더 필요해지면 다시 본다.
-        history.replaceState(null, '', currentHash || '#/');
+        if (targetIdx === null) history.back();
+        else if (targetIdx !== currentIdx) history.go(currentIdx - targetIdx);
+        else history.replaceState({ idx: currentIdx }, '', currentHash || '#/');
         return;
       }
+      currentIdx = targetIdx ?? currentIdx + 1;
+      if (targetIdx === null) history.replaceState({ idx: currentIdx }, '');
       currentHash = target;
       setRoute(parseHash(target));
     };
