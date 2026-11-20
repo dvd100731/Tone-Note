@@ -466,7 +466,8 @@ type PickupPosition = 'neck' | 'middle' | 'bridge';
 interface PickupSlot { position: PickupPosition; type: GuitarPickupType | BassPickupType }
 
 interface InstrumentProfile {
-  id: string; kind: InstrumentKind; name: string;
+  id: string; kind: InstrumentKind | 'unknown'; name: string;   // 'unknown' = 이전 데이터에서 종류를 정할 수 없음. 사용자가 고르기 전까지 추천에 쓰지 않음
+  legacy?: LegacyGearInfo;                 // v1에서 옮겨 온 경우 원래 분류를 구조적으로 보존
   maker?: string; model?: string; catalogRef?: CatalogRef;   // 비우면 '미지정'
   guitar?: { bodyShape: GuitarBodyShape; construction: BodyConstruction; pickups: PickupSlot[] };
   bass?: { bodyType: BassBodyType; electronics: Electronics; pickups: PickupSlot[]; strings?: 4 | 5 | 6 };
@@ -495,7 +496,8 @@ interface Control {                          // v1 필드 그대로 + 선택 필
 
 interface Device {
   id: string; kind: DeviceKind; name: string;
-  usableWith: InstrumentKind[];              // v1 Gear.instruments
+  usableWith: InstrumentKind[];              // v1 Gear.instruments 그대로. 빈 배열 = 미지정(자동으로 채우지 않음)
+  legacy?: LegacyGearInfo;
   maker?: string; model?: string; catalogRef?: CatalogRef;
   source: 'catalog' | 'generic' | 'custom' | 'migrated';
   ampType?: 'combo' | 'head' | 'preamp' | 'modeler' | 'unknown';   // amp
@@ -506,6 +508,7 @@ interface Device {
 }
 interface EffectBlockDef { id: string; effectType: EffectType; label: string; params: Control[] }
 interface CatalogRef { catalogId: string; catalogVersion: number }
+interface LegacyGearInfo { schemaVersion: 1; kind: 'instrument' | 'amp' | 'pedal' | 'multi' | 'synth' | 'other'; instruments: InstrumentKind[] }   // v1 값 그대로, 순서 포함
 
 // ---- 장비 구성 ----
 interface Rig { id: string; name: string; instrumentId: string; chain: RigSlot[]; createdAt: string; updatedAt: string }
@@ -582,14 +585,18 @@ interface SourceRef { kind: 'official' | 'interview' | 'video' | 'book' | 'manua
 ### 11.3 기존 데이터 이전 (v1 → v2)
 
 **변환표** — ID·이름·조절 항목·메모·시각은 모두 그대로 옮긴다(손실 없음).
+모든 장비에 `legacy = { schemaVersion: 1, kind: v1 kind, instruments: v1 instruments(순서 그대로) }`를 붙인다. 원래 분류와 사용 악기 목록을 메모가 아닌 구조로 보존하기 위해서다. 메모는 원문 그대로 두고 아무것도 덧붙이지 않는다.
 | v1 | v2 |
 |---|---|
-| `Gear` kind `amp` | `Device` kind `amp`, `ampType 'unknown'`, `source 'migrated'`, `usableWith = instruments` |
+| `Gear` kind `amp` | `Device` kind `amp`, `ampType 'unknown'`, `source 'migrated'`, `usableWith = instruments`(빈 배열이면 빈 배열 그대로 — 미지정) |
 | `pedal` | `Device` kind `pedal`, `effectType 'unknown'`(사용자가 나중에 지정) |
 | `multi` | `Device` kind `multi`, 기존 `controls`는 장치 전체 조절로, `blocks = []` |
 | `other` | `Device` kind `other` |
-| `instrument` | `InstrumentProfile`, `kind = instruments[0]`, 하위 분류 `unknown`, `pickups = []`. 사용 악기가 여러 개면 메모에 원래 목록을 기록 |
-| `synth` | `instruments`에 `keys`가 있으면 `InstrumentProfile(keys)`, 없으면 `Device` kind `other`(기타 신스 페달 같은 경우) |
+| `instrument`, 사용 악기 **정확히 1개** | `InstrumentProfile`, `kind` = 그 악기, 하위 분류 `unknown`, `pickups = []` |
+| `instrument`, 사용 악기 **0개 또는 2개 이상** | `InstrumentProfile`, `kind 'unknown'`(베이스·기타를 임의로 고르지 않음), 하위 정보 없음. 목록은 `legacy.instruments`에 보존. 화면에 "악기 종류를 골라 주세요" 표시, 고르기 전에는 장비 구성·추천에 쓰지 않음 |
+| `synth`, 사용 악기가 정확히 `['keys']` | `InstrumentProfile` kind `keys` |
+| `synth`, `keys` 없이 다른 악기 1개 이상(예: 기타 신스 페달) | `Device` kind `other`, `usableWith = instruments` |
+| `synth`, 0개 또는 `keys`를 포함한 2개 이상 | `InstrumentProfile` kind `'unknown'`, `legacy`에 보존(위와 같은 처리) |
 | `songs` | 그대로 + `source 'user'` |
 | `tones` | 그대로. 새 필드는 추가하지 않음. `chain` 스냅샷과 값은 한 글자도 바꾸지 않음 |
 | (없음) | `rigs = []`. 자동으로 만들지 않고 사용자가 구성 |
@@ -600,10 +607,29 @@ interface SourceRef { kind: 'official' | 'interview' | 'video' | 'book' | 'manua
    - 확인되면 `migrateV1toV2`(순수 함수)로 바꾸고, v2 검증기로 다시 확인한다.
    - 결과는 `ok`로 돌려주되, `migratedFrom: 1`과 원본 문자열을 메모리에 함께 둔다.
 2. **불러오기 시점에는 저장하지 않는다**(1단계 원칙 유지). 처음으로 데이터를 바꿀 때 아래 순서로 저장한다.
-   1. 백업 키 `tonenote:backup:schema1`이 없으면, 원본 v1 문자열을 그대로 그 키에 쓴다.
-   2. **백업 쓰기가 실패하면 본 키에 쓰지 않는다.** 결과는 `failed`로, 화면 데이터는 이전 그대로 둔다. 안내 문구는 "원본 백업을 만들지 못해 저장하지 않았습니다"다.
-   3. 백업에 성공하면 본 키 `tonenote:v1`에 v2를 쓴다. 키 이름은 바꾸지 않는다(이름 속 v1은 저장 공간 이름이고, 버전은 `schemaVersion`이 나타낸다).
-3. 백업은 사용자가 데이터 화면(10단계)에서 내려받거나 지우기 전까지 남겨 둔다.
+   1. **백업 식별**: 현재 본 키의 v1 원본 문자열로 해시를 계산한다(동기 32비트 이상 해시, 예: cyrb53). 백업 키는 `tonenote:backup:schema1:<해시>`다.
+      - 백업 값은 `{ app: 'tone-note', type: 'migration-backup', schemaVersion: 1, sourceKey: 'tonenote:v1', createdAt, length, hash, raw }` 형태의 JSON이다.
+   2. **같은 키가 이미 있으면 내용을 비교한다.**
+      - `raw`가 현재 원본과 바이트 단위로 같으면 그 백업을 재사용한다. 다시 쓰지 않는다.
+      - 해시는 같은데 `raw`가 다르면(충돌), `…:<해시>-2`, `-3`처럼 비어 있는 다음 키를 쓴다. **기존 백업은 절대 덮어쓰거나 지우지 않는다.**
+   3. **현재 원본과 다른 백업이 이미 있을 때**(예: 예전에 만든 백업이 있고, 그 뒤 예전 버전 앱으로 v1 데이터를 계속 고친 경우)
+      - 해시가 다르므로 현재 원본은 새 키에 따로 백업한다.
+      - 기존 백업은 그대로 남긴다. 결과적으로 백업이 여러 개 공존할 수 있다.
+   4. **백업 쓰기 후 다시 읽어 확인한다.** 읽은 `raw`가 원본과 다르거나 읽기에 실패하면 본 키에 쓰지 않는다.
+   5. **백업 쓰기·확인이 실패하면 본 키에 쓰지 않는다.**
+      - 결과는 `failed`, 화면 데이터는 이전 상태다.
+      - 안내 문구: "원본 백업을 만들지 못해 저장하지 않았습니다. 데이터 화면에서 내보내기로 백업한 뒤 다시 시도해 주세요."
+      - 일부만 써진 백업 키가 남을 수 있다. 다음 시도 때 2번의 비교로 걸러지고, 원본과 같지 않으면 재사용하지 않는다.
+   6. 백업이 확인되면 본 키 `tonenote:v1`에 v2를 쓴다. 키 이름은 바꾸지 않는다(이름 속 v1은 저장 공간 이름이고, 버전은 `schemaVersion`이 나타낸다).
+   7. **본 키 쓰기가 실패하면**
+      - 본 키는 이전 v1 원본 그대로, 화면 데이터는 이전 상태, 결과는 `failed`다.
+      - **만들어진 백업은 지우지 않고 보존한다**(원본과 같은 내용).
+      - 재시도할 때는 2번 규칙으로 그 백업을 재사용하고, 본 키 쓰기만 다시 한다.
+   8. 이전이 끝난 뒤(본 키가 v2)에는 백업 단계를 건너뛴다.
+3. **백업 보존·발견**
+   - 백업은 자동으로 지우지 않는다. 사용자가 데이터 화면(10단계)에서 하나씩 내려받거나 지울 때까지 남긴다.
+   - 백업 목록은 `tonenote:backup:schema1:` 접두어로 키를 훑어 찾는다. 그래서 저장소 인터페이스에 `key(i)`·`length`가 필요하다.
+   - 백업 때문에 저장 공간이 부족해질 수 있다. 이 경우 5번 실패 안내가 나간다. 10단계 전에 실패하면 브라우저 개발자 도구 외에는 백업을 정리할 방법이 없다. 이 위험은 3단계 인계에 기록한다.
 4. 다음 경우는 이전 시도 자체를 하지 않는다. 지금처럼 저장을 차단하고 원본을 보존한다.
    - v1인데 손상됨
    - 앱보다 높은 버전
@@ -617,8 +643,26 @@ interface SourceRef { kind: 'official' | 'interview' | 'video' | 'book' | 'manua
   - 모든 ID가 남아 있다.
   - `controls`가 원본과 깊은 비교로 같다.
   - 톤 `chain`이 원본과 깊은 비교로 같다.
+  - 메모는 원문과 같다(아무것도 덧붙이지 않음).
+  - 모든 장비의 `legacy.kind`·`legacy.instruments`가 v1 값과 같다(순서 포함).
 - 같은 입력을 두 번 바꿔도 같은 결과가 나온다(멱등).
-- 백업 쓰기 실패와 본 키 쓰기 실패를 각각 모의한다. 이때 저장소·화면 데이터가 바뀌지 않아야 한다.
+- **사용 악기 경계 사례**
+  - `amp`·`pedal`·`multi`·`other` + `instruments: []` → `usableWith: []`, 다른 악기가 채워지지 않는다.
+  - `instrument` + `[]` → `kind 'unknown'`, `legacy.instruments: []`, 조절 항목 그대로.
+  - `instrument` + `['bass', 'guitar']` → `kind 'unknown'`(첫 번째로 정하지 않음), `legacy.instruments`가 순서 그대로.
+  - `instrument` + `['guitar']` → `kind 'guitar'`.
+  - `synth` + `['keys']` → keys 악기 / `['guitar']` → `Device other` / `[]` → `kind 'unknown'` / `['keys', 'guitar']` → `kind 'unknown'`.
+  - 장치 + `['bass', 'guitar', 'keys']` → `usableWith`가 같은 순서로 3개.
+- **백업·저장 실패 사례** — 모두 가짜 저장소로 검사한다. 각 사례에서 본 키 값, 백업 키 목록과 내용, 돌려준 화면 데이터를 확인한다.
+  1. 백업 쓰기 실패 → 본 키는 v1 원본 그대로, 화면은 이전 상태, 결과 `failed`.
+  2. 백업 성공 + 본 키 쓰기 실패 → 본 키는 v1 원본 그대로, 화면은 이전 상태, 결과 `failed`. **백업 키 1개가 생기고 그 `raw`는 원본과 같다.**
+  3. 2번 뒤 재시도(성공) → 백업이 새로 생기지 않고(키 1개 유지) 본 키는 v2.
+  4. 백업 쓰기 후 다시 읽은 값이 다름(모의) → 본 키 쓰지 않음, 결과 `failed`.
+  5. 현재 원본과 다른 기존 백업 있음 → 새 해시 키로 현재 원본 백업, 기존 백업 키·내용 그대로, 본 키는 v2.
+  6. 현재 원본과 같은 기존 백업 있음 → 재사용(쓰기 호출 없음), 본 키는 v2.
+  7. 같은 해시 키에 다른 `raw`(충돌 모의) → `-2` 키에 백업, 기존 키 그대로.
+  8. 깨진 기존 백업(JSON 아님)이 같은 키에 있음 → 덮어쓰지 않고 다음 접미 키 사용.
+  9. 이미 v2인 본 키 → 백업 단계 생략, 기존 백업 그대로.
 - 백업 문자열이 원본과 바이트 단위로 같다.
 
 ### 11.4 추천 데이터 확보 방식과 중간 구현 범위
@@ -730,7 +774,7 @@ interface SourceRef { kind: 'official' | 'interview' | 'video' | 'book' | 'manua
 
 | 단계 | 작업 | 완료·검증 기준 |
 |---|---|---|
-| **3. 데이터 모델 v2·이전** (화면 기능은 그대로) | v2 타입, v2 검증기, v1 검증기 보존, `migrateV1toV2`, 첫 저장 시 백업, 기존 장비 화면을 `devices`/`instruments`에 연결 | 11.3 테스트 기준 전부 통과. 브라우저에서 v1 데이터 주입 → 목록 표시 → 수정 저장 → 백업 키가 원본과 같음 → 새로고침 후 유지. 저장 실패 모의 시 백업·본 키·화면 모두 그대로 |
+| **3. 데이터 모델 v2·이전** (화면 기능은 그대로) | v2 타입, v2 검증기, v1 검증기 보존, `migrateV1toV2`(`legacy` 보존, 종류를 모르면 `unknown`), 해시 키 백업·확인·재사용, 기존 장비 화면을 `devices`/`instruments`에 연결, 종류 미정 악기 표시 | 11.3 테스트 기준(경계 사례·백업 사례 1~9) 전부 통과. 브라우저: v1 데이터 주입 → 목록 표시 → 수정 저장 → 백업 키의 `raw`가 원본과 같음 → 새로고침 후 유지. **백업 쓰기 실패 모의**: 본 키·화면 이전 상태, 백업 없음(또는 원본과 다른 부분 기록만). **본 키 쓰기 실패 모의**: 본 키·화면 이전 상태, 원본 백업 보존 → 재시도 성공 시 백업 1개 유지 |
 | **4. 디자인 기반·노브** | 차콜·앰버 테마, 공통 컴포넌트, 노브, 장비 이미지 영역(이미지는 작업 D 결정 후 채움), `ASSETS.md`. 기존 장비 화면에 적용 | 노브 계산 단위 테스트(경계·간격·소수 자릿수). 키보드·끌기·숫자 입력 실측. 터치 영역 44px 실측. 대비 측정. 2단계 기능(검증·저장 실패 안내 위치·이탈 확인) 회귀 없음 |
 | **5. 악기 선택·상세** (흐름 1~2) | 악기 카드, 기타 바디 계열·구조·픽업 구성(프리셋 + 직접), 베이스 종류·전자회로·픽업, 제조사·모델 검색(내장 + 내 등록)·직접 등록·미지정, 조절 템플릿 생성 | 관계 검증 테스트(위치 중복·악기별 픽업 종류·`kind` 일치·HSS 등 표기 파생). 모두 미지정인 상태로도 저장 가능. 템플릿 생성 후 수정이 유지됨 |
 | **6. 보유 장비 구성** (흐름 3) | 앰프·페달·멀티 등록(카탈로그·일반 효과 종류·직접), 멀티 블록·파라미터 편집, 구성 화면(순서·사용 여부, 페달 + 멀티 혼합) | 블록·파라미터 분리 저장 테스트. 순서·사용 여부가 새로고침 후 유지. 장치를 삭제할 때 그 장치를 쓰는 구성이 몇 개인지 표시하고, 기존 톤 스냅샷은 그대로 |
@@ -759,6 +803,13 @@ interface SourceRef { kind: 'official' | 'interview' | 'video' | 'book' | 'manua
 ---
 
 ## 12. 개정 이력
+
+### 2026-11-20 Codex 계획 검토 보완 (문서만)
+1. `instruments: []` 장비 이전 규칙: 장치는 `usableWith: []`(미지정) 그대로, 악기 계열은 `kind 'unknown'`. 베이스·기타를 임의로 지정하지 않음.
+2. 사용 악기가 여러 개인 경우: 첫 번째로 정하지 않고 `kind 'unknown'`. 모든 장비에 `legacy`(v1 kind·instruments)를 구조적으로 보존. 메모에는 덧붙이지 않음.
+3. 백업 성공 후 본 키 실패: "모든 키 불변"을 "본 데이터·화면은 이전 상태, 원본 백업은 보존"으로 정정. 재시도 때 백업 재사용.
+4. 기존 백업이 현재 원본과 다를 때: 해시 키로 식별, 비교 후 재사용 또는 새 키 백업, 기존 백업은 덮어쓰거나 지우지 않음. 쓰기 후 다시 읽어 확인.
+5. 11.3 테스트 기준에 경계 사례와 백업 사례 1~9 추가, 11.6 3단계 기준 갱신.
 
 ### 2026-11-20 사용자 정정 반영 (문서만)
 1. 최종 기능 목표를 명시: 실제 곡 검색 + 내 악기·앰프·페달·멀티이펙터 구성에 맞는 톤 설정 확인·저장.
