@@ -211,13 +211,13 @@ function GearForm({ existing }: { existing: Gear | undefined }) {
           </button>
         </section>
 
-        {(errorCount > 0 || saveError) && (
-          <p className="form-error" role="alert">
-            {saveError ?? `입력을 확인해 주세요. 고칠 곳이 ${errorCount}곳 있습니다.`}
-          </p>
-        )}
-
+        {/* 오류 문구는 화면 하단에 고정된 저장 버튼 줄 안에 둬서, 스크롤 위치와 상관없이 누른 직후 보이게 한다 */}
         <div className="form-actions">
+          {(errorCount > 0 || saveError) && (
+            <p className="form-error" role="alert">
+              {saveError ?? `입력을 확인해 주세요. 고칠 곳이 ${errorCount}곳 있습니다.`}
+            </p>
+          )}
           <button type="button" className="button secondary" onClick={() => (window.location.hash = '#/gear')}>
             취소
           </button>
